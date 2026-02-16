@@ -35,3 +35,4 @@ ycsb/
 report/
 backer.*/
 .remotes
+bin/

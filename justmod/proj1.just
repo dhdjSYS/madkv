@@ -6,58 +6,62 @@ default:
 
 # install extra dependencies of your KV code
 deps:
-    # FIXME: your dependency installation commands here
+    sudo apt-get update && sudo apt-get install -y protobuf-compiler
+    sudo snap install go --classic
+    go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 
 # build your executables in release mode
 build:
-    # FIXME: your build commands here (don't include clean)
+    export PATH=$PATH:$(go env GOPATH)/bin && cd kvstore && protoc --go_out=pb --go_opt=paths=source_relative --go-grpc_out=pb --go-grpc_opt=paths=source_relative -I proto proto/kvstore.proto
+    cd kvstore && go build -o ../bin/kvserver ./server
+    cd kvstore && go build -o ../bin/kvclient ./client
 
 # clean the build of your executables
 clean:
-    # FIXME: your clean commands here
+    rm -f bin/kvserver bin/kvclient bin/kvserver.exe bin/kvclient.exe
 
 # run your KV store server
 server listen="0.0.0.0:3777":
-    # FIXME: your server run command here, listening on addr for new clients
+    ./bin/kvserver --listen "{{listen}}"
 
 # run you KV store client in stdin/out interface mode
 client server="127.0.0.1:3777":
-    # FIXME: your client run command here, connecting to server at addr
+    ./bin/kvclient --server "{{server}}"
 
 # run your KV store testcase 1 client
 test1 server="127.0.0.1:3777":
-    # FIXME: your testcase 1 client run command here
-    #        for testcases, feel free to reuse 'just p1::client' if you
-    #        designed your clients this way, or invoke different executables
+    ./bin/kvclient --server "{{server}}" --test 1
 
 # run your KV store testcase 2 client
 test2 server="127.0.0.1:3777":
-    # FIXME: your testcase 2 client run command here
+    ./bin/kvclient --server "{{server}}" --test 2
 
 # run your KV store testcase 3 client
 test3 server="127.0.0.1:3777":
-    # FIXME: your testcase 3 client run command here
+    ./bin/kvclient --server "{{server}}" --test 3 --clientid 0 &
+    ./bin/kvclient --server "{{server}}" --test 3 --clientid 1 &
+    ./bin/kvclient --server "{{server}}" --test 3 --clientid 2 &
+    wait
 
-# run your KV store testcase 4 client(s)
+# run your KV store testcase 4 client(s) - concurrent relay
 test4 server="127.0.0.1:3777":
-    # FIXME: your testcase 4 client(s) run commands here
-    #        for multi-client testcases, this recipe should run multiple
-    #        concurrent client processes; you may write an additional runner
-    #        utility or a scripting layer to manage multiple processes
+    ./bin/kvclient --server "{{server}}" --test 4 --clientid 0 &
+    ./bin/kvclient --server "{{server}}" --test 4 --clientid 1 &
+    ./bin/kvclient --server "{{server}}" --test 4 --clientid 2 &
+    wait
 
-# run your KV store testcase 5 client(s)
+# run your KV store testcase 5 client(s) - concurrent contention
 test5 server="127.0.0.1:3777":
-    # FIXME: your testcase 5 client(s) run commands here
+    ./bin/kvclient --server "{{server}}" --test 5 --clientid 0 &
+    ./bin/kvclient --server "{{server}}" --test 5 --clientid 1 &
+    ./bin/kvclient --server "{{server}}" --test 5 --clientid 2 &
+    wait
 
 # kill all processes of your KV store system
 kill:
-    # FIXME: your kill commands here
-    #        make sure that it kills all server, clients, and any extra helper
-    #        processes of your system; redirecting both out & err to /dev/null
-    #        is recommended
-    #   TIP: commands such as 'pkill' may return non-zero exit code on success,
-    #        which would by default abort the 'just' recipe early; prepend the
-    #        command with a '-' sign to ignore its exit code
+    -pkill -f kvserver 2>/dev/null
+    -pkill -f kvclient 2>/dev/null
 
 # NOTE: feel free to add more recipes as you see fit...
 #       also feel free to add extra parameters to the recipes as you see fit,
