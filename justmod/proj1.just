@@ -6,7 +6,7 @@ default:
 
 # install extra dependencies of your KV code
 deps:
-    sudo apt-get update && sudo apt-get install -y protobuf-compiler
+    sudo apt-get update && sudo apt-get install -y protobuf-compiler snapd
     sudo snap install go --classic
     go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
     go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest

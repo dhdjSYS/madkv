@@ -1,0 +1,26 @@
+PUT aLOLOLOLOL not_found
+PUT bLOLZ not_found
+PUT cLULULULULUL not_found
+GET bLOLZ world
+PUT aLOLOLOLOL found
+GET aLOLOLOLOL updated
+GET nonexistent null
+SWAP bLOLZ world
+SWAP missing null
+GET bLOLZ swapped
+GET missing val
+DELETE cLULULULULUL found
+DELETE cLULULULULUL not_found
+GET cLULULULULUL null
+SCAN aLOLOLOLOL missing BEGIN
+  aLOLOLOLOL updated
+  bLOLZ swapped
+  missing val
+SCAN END
+SCAN zzz zzzzz BEGIN
+SCAN END
+SCAN aLOLOLOLOL aLOLOLOLOL BEGIN
+  aLOLOLOLOL updated
+SCAN END
+STOP
+test1: 17 passed, 0 failed

@@ -1,0 +1,6 @@
+STOP
+test3 (client 1): 21600 passed, 0 failed
+STOP
+test3 (client 0): 21600 passed, 0 failed
+STOP
+test3 (client 2): 21600 passed, 0 failed
