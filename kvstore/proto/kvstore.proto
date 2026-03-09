@@ -12,6 +12,11 @@ service KvStore {
   rpc Delete(DeleteRequest) returns (DeleteResponse);
 }
 
+service Manager {
+  rpc RegisterServer(RegisterServerRequest) returns (RegisterServerResponse);
+  rpc DiscoverServers(DiscoverServersRequest) returns (DiscoverServersResponse);
+}
+
 message PutRequest {
   string key = 1;
   string value = 2;
@@ -60,4 +65,23 @@ message DeleteRequest {
 
 message DeleteResponse {
   bool found = 1;
+}
+
+message RegisterServerRequest {
+  int32 id = 1;
+}
+
+message RegisterServerResponse {
+  bool accepted = 1;
+}
+
+message DiscoverServersRequest {}
+
+message DiscoverServersResponse {
+  repeated ServerInfo servers = 1;
+}
+
+message ServerInfo {
+  int32 id = 1;
+  string address = 2;
 }

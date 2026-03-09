@@ -5,8 +5,10 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,6 +17,154 @@ import (
 
 	pb "kvstore/pb"
 )
+
+type routingClient struct {
+	clients []pb.KvStoreClient
+	conns   []*grpc.ClientConn
+	n       int
+}
+
+var _ pb.KvStoreClient = (*routingClient)(nil)
+
+func partitionFor(key string, n int) int { // hash partitioning and fanning out SCANs.
+	h := fnv.New32a()
+	h.Write([]byte(key))
+	return int(h.Sum32() % uint32(n)) //honestlly this makes things so easy
+}
+
+func (r *routingClient) Put(_ context.Context, in *pb.PutRequest, opts ...grpc.CallOption) (*pb.PutResponse, error) {
+	c := r.clients[partitionFor(in.Key, r.n)]
+	for {
+		resp, err := c.Put(context.Background(), in, opts...)
+		if err == nil {
+			return resp, nil
+		}
+	}
+}
+
+func (r *routingClient) Swap(_ context.Context, in *pb.SwapRequest, opts ...grpc.CallOption) (*pb.SwapResponse, error) {
+	c := r.clients[partitionFor(in.Key, r.n)]
+	for {
+		resp, err := c.Swap(context.Background(), in, opts...)
+		if err == nil {
+			return resp, nil
+		}
+	}
+}
+
+func (r *routingClient) Get(_ context.Context, in *pb.GetRequest, opts ...grpc.CallOption) (*pb.GetResponse, error) {
+	c := r.clients[partitionFor(in.Key, r.n)]
+	for {
+		resp, err := c.Get(context.Background(), in, opts...)
+		if err == nil {
+			return resp, nil
+		}
+	}
+}
+
+func (r *routingClient) Delete(_ context.Context, in *pb.DeleteRequest, opts ...grpc.CallOption) (*pb.DeleteResponse, error) {
+	c := r.clients[partitionFor(in.Key, r.n)]
+	for {
+		resp, err := c.Delete(context.Background(), in, opts...)
+		if err == nil {
+			return resp, nil
+		}
+	}
+}
+
+func (r *routingClient) Scan(_ context.Context, in *pb.ScanRequest, opts ...grpc.CallOption) (*pb.ScanResponse, error) {
+	var allEntries []*pb.KeyValue
+	for i := 0; i < r.n; i++ {
+		for {
+			resp, err := r.clients[i].Scan(context.Background(), in, opts...)
+			if err == nil {
+				allEntries = append(allEntries, resp.Entries...)
+				break
+			}
+		}
+	}
+	sort.Slice(allEntries, func(i, j int) bool {
+		return allEntries[i].Key < allEntries[j].Key
+	})
+	return &pb.ScanResponse{Entries: allEntries}, nil
+}
+
+// ScanPartial is like Scan but uses a per-server timeout, skipping down servers. ONLY USED FOR TEST6
+func (r *routingClient) ScanPartial(in *pb.ScanRequest, timeout time.Duration) *pb.ScanResponse {
+	var allEntries []*pb.KeyValue
+	for i := 0; i < r.n; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		resp, err := r.clients[i].Scan(ctx, in)
+		cancel()
+		if err == nil {
+			allEntries = append(allEntries, resp.Entries...)
+		}
+	}
+	sort.Slice(allEntries, func(i, j int) bool {
+		return allEntries[i].Key < allEntries[j].Key
+	})
+	return &pb.ScanResponse{Entries: allEntries}
+}
+
+func (r *routingClient) Close() {
+	for _, c := range r.conns {
+		c.Close()
+	}
+}
+
+func discoverAndConnect(managerAddr string) *routingClient {
+	var servers []*pb.ServerInfo
+
+	for {
+		conn, err := grpc.NewClient(managerAddr,
+			grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			log.Printf("failed to connect to manager: %v, retrying...", err)
+			time.Sleep(time.Second)
+			continue
+		}
+
+		client := pb.NewManagerClient(conn)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		resp, err := client.DiscoverServers(ctx, &pb.DiscoverServersRequest{})
+		cancel()
+		conn.Close()
+
+		if err != nil {
+			log.Printf("failed to discover servers: %v, retrying...", err)
+			time.Sleep(time.Second)
+			continue
+		}
+
+		servers = resp.Servers
+		break
+	}
+
+	sort.Slice(servers, func(i, j int) bool {
+		return servers[i].Id < servers[j].Id
+	})
+
+	n := len(servers)
+	rc := &routingClient{
+		clients: make([]pb.KvStoreClient, n),
+		conns:   make([]*grpc.ClientConn, n),
+		n:       n,
+	}
+
+	for i, s := range servers {
+		conn, err := grpc.NewClient(s.Address,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithDefaultCallOptions(grpc.WaitForReady(true)))
+		if err != nil {
+			log.Fatalf("failed to connect to server %d at %s: %v", s.Id, s.Address, err)
+		}
+		rc.conns[i] = conn
+		rc.clients[i] = pb.NewKvStoreClient(conn)
+	}
+
+	log.Printf("discovered %d servers", n)
+	return rc
+}
 
 func runStdin(client pb.KvStoreClient) {
 	scanner := bufio.NewScanner(os.Stdin)
@@ -546,6 +696,166 @@ func runTest5(client pb.KvStoreClient, clientID int) {
 	}
 }
 
+// Test 6
+func runTest6(client pb.KvStoreClient) {
+	writer := bufio.NewWriter(os.Stdout)
+	reader := bufio.NewReader(os.Stdin)
+	ctx := context.Background()
+	passed := 0
+	failed := 0
+
+	fail := func(msg string) {
+		fmt.Fprintf(writer, "  FAIL: %s\n", msg)
+		writer.Flush()
+		failed++
+	}
+
+	waitEnter := func(msg string) {
+		fmt.Fprintf(writer, "\n>>> %s\n>>> Press Enter to continue...\n", msg)
+		writer.Flush()
+		reader.ReadString('\n')
+	}
+
+	// Pre-computed partition assignments for n=3 (FNV-1a):
+	keys := map[int][]string{
+		0: {"bravo", "foxtrot", "hotel", "india", "lima", "november", "papa", "uniform", "victor"},
+		1: {"charlie", "delta", "aaa", "juliet", "romeo", "tango", "xray", "banana", "cherry"},
+		2: {"alpha", "echo", "golf", "kilo", "mike", "oscar", "quebec", "sierra", "whiskey"},
+	}
+	killPartition := 1
+
+	waitEnter("Step 1: Ensure cluster with 3 servers is running")
+
+	fmt.Fprintf(writer, "\n=== Step 2: PUT and SWAP across all partitions ===\n")
+	writer.Flush()
+	for p := 0; p < 3; p++ {
+		for _, key := range keys[p] {
+			val := "v_" + key
+			_, err := client.Put(ctx, &pb.PutRequest{Key: key, Value: val})
+			if err != nil {
+				fail(fmt.Sprintf("PUT %s: %v", key, err))
+			} else {
+				fmt.Fprintf(writer, "  PUT %s=%s (partition %d) OK\n", key, val, p)
+				passed++
+			}
+		}
+	}
+	for p := 0; p < 3; p++ {
+		key := keys[p][0]
+		newVal := "sw_" + key
+		resp, err := client.Swap(ctx, &pb.SwapRequest{Key: key, Value: newVal})
+		if err != nil {
+			fail(fmt.Sprintf("SWAP %s: %v", key, err))
+		} else {
+			fmt.Fprintf(writer, "  SWAP %s old=%s new=%s (partition %d) OK\n", key, resp.OldValue, newVal, p)
+			passed++
+		}
+	}
+	writer.Flush()
+
+	fmt.Fprintf(writer, "\n=== Step 3: GET and SCAN verify all data ===\n")
+	writer.Flush()
+	for p := 0; p < 3; p++ {
+		for _, key := range keys[p] {
+			resp, err := client.Get(ctx, &pb.GetRequest{Key: key})
+			if err != nil {
+				fail(fmt.Sprintf("GET %s: %v", key, err))
+			} else if !resp.Found {
+				fail(fmt.Sprintf("GET %s: not found", key))
+			} else {
+				fmt.Fprintf(writer, "  GET %s=%s (partition %d) OK\n", key, resp.Value, p)
+				passed++
+			}
+		}
+	}
+	scanResp, err := client.Scan(ctx, &pb.ScanRequest{KeyStart: "a", KeyEnd: "z"})
+	if err != nil {
+		fail(fmt.Sprintf("SCAN a-z: %v", err))
+	} else {
+		fmt.Fprintf(writer, "  SCAN a-z returned %d entries OK\n", len(scanResp.Entries))
+		passed++
+	}
+	writer.Flush()
+
+	waitEnter(fmt.Sprintf("Step 4: Kill server %d now (port %d)", killPartition, 3777+killPartition))
+
+	fmt.Fprintf(writer, "\n=== Step 5: GET and SCAN on unaffected partitions ===\n")
+	writer.Flush()
+	for p := 0; p < 3; p++ {
+		if p == killPartition {
+			continue
+		}
+		key := keys[p][0]
+		resp, err := client.Get(ctx, &pb.GetRequest{Key: key})
+		if err != nil {
+			fail(fmt.Sprintf("GET %s (partition %d): %v", key, p, err))
+		} else if !resp.Found {
+			fail(fmt.Sprintf("GET %s (partition %d): not found", key, p))
+		} else {
+			fmt.Fprintf(writer, "  GET %s=%s (partition %d) OK\n", key, resp.Value, p)
+			passed++
+		}
+	}
+	// ScanPartial with 5s per-server timeout: returns partial results, skipping the down server
+	rc := client.(*routingClient)
+	scanResp2 := rc.ScanPartial(&pb.ScanRequest{KeyStart: "a", KeyEnd: "z"}, 5*time.Second)
+	fmt.Fprintf(writer, "  SCAN a-z returned %d entries (missing partition %d keys) OK\n", len(scanResp2.Entries), killPartition)
+	passed++
+	writer.Flush()
+
+	fmt.Fprintf(writer, "\n=== Step 6: GET on failed partition %d (expecting timeout) ===\n", killPartition)
+	writer.Flush()
+	failedKey := keys[killPartition][0]
+	done := make(chan *pb.GetResponse, 1)
+	go func() {
+		resp, _ := client.Get(ctx, &pb.GetRequest{Key: failedKey})
+		done <- resp
+	}()
+	select {
+	case <-done:
+		fail(fmt.Sprintf("GET %s should have blocked but returned", failedKey))
+	case <-time.After(5 * time.Second):
+		fmt.Fprintf(writer, "  GET %s blocked as expected (partition %d is down)\n", failedKey, killPartition)
+		passed++
+	}
+	writer.Flush()
+
+	waitEnter(fmt.Sprintf("Step 7: Restart server %d now (port %d, same backer path)", killPartition, 3777+killPartition))
+
+	select {
+	case <-done:
+		fmt.Fprintf(writer, "  Background GET unblocked after restart\n")
+	case <-time.After(30 * time.Second):
+		fail("background GET still blocked after restart")
+	}
+	writer.Flush()
+
+	fmt.Fprintf(writer, "\n=== Step 8: GET on recovered partition ===\n")
+	writer.Flush()
+	resp, err := client.Get(ctx, &pb.GetRequest{Key: failedKey})
+	if err != nil {
+		fail(fmt.Sprintf("GET %s: %v", failedKey, err))
+	} else if !resp.Found {
+		fail(fmt.Sprintf("GET %s: not found after recovery", failedKey))
+	} else {
+		expected := "sw_" + failedKey
+		if resp.Value == expected {
+			fmt.Fprintf(writer, "  GET %s=%s recovered correctly!\n", failedKey, resp.Value)
+			passed++
+		} else {
+			fail(fmt.Sprintf("GET %s: expected %s, got %s", failedKey, expected, resp.Value))
+		}
+	}
+
+	fmt.Fprintf(writer, "\nSTOP\n")
+	fmt.Fprintf(writer, "test6: %d passed, %d failed\n", passed, failed)
+	writer.Flush()
+
+	if failed > 0 {
+		os.Exit(1)
+	}
+}
+
 func processCommand(client pb.KvStoreClient, writer *bufio.Writer, fields []string, line string) {
 	ctx := context.Background()
 
@@ -634,18 +944,30 @@ func processCommand(client pb.KvStoreClient, writer *bufio.Writer, fields []stri
 }
 
 func main() {
-	server := flag.String("server", "127.0.0.1:3777", "server address")
+	server := flag.String("server", "", "server address (single-server mode)")
+	manager := flag.String("manager", "", "manager address for server discovery")
 	test := flag.Int("test", 0, "run built-in test (1-5), 0 for stdin mode")
 	clientID := flag.Int("clientid", 0, "client ID for multi-client tests")
 	flag.Parse()
 
-	conn, err := grpc.NewClient(*server, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		log.Fatalf("failed to connect: %v", err)
-	}
-	defer conn.Close()
+	var client pb.KvStoreClient
+	var cleanup func()
 
-	client := pb.NewKvStoreClient(conn)
+	if *manager != "" {
+		rc := discoverAndConnect(*manager)
+		client = rc
+		cleanup = rc.Close
+	} else if *server != "" {
+		conn, err := grpc.NewClient(*server, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			log.Fatalf("failed to connect: %v", err)
+		}
+		client = pb.NewKvStoreClient(conn)
+		cleanup = func() { conn.Close() }
+	} else {
+		log.Fatal("must specify --server or --manager")
+	}
+	defer cleanup()
 
 	switch *test {
 	case 0:
@@ -660,6 +982,8 @@ func main() {
 		runTest4(client, *clientID)
 	case 5:
 		runTest5(client, *clientID)
+	case 6:
+		runTest6(client)
 	default:
 		log.Fatalf("unknown test: %d", *test)
 	}

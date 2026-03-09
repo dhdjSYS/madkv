@@ -271,3 +271,143 @@ var KvStore_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "kvstore.proto",
 }
+
+const (
+	Manager_RegisterServer_FullMethodName  = "/kvstore.Manager/RegisterServer"
+	Manager_DiscoverServers_FullMethodName = "/kvstore.Manager/DiscoverServers"
+)
+
+// ManagerClient is the client API for Manager service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type ManagerClient interface {
+	RegisterServer(ctx context.Context, in *RegisterServerRequest, opts ...grpc.CallOption) (*RegisterServerResponse, error)
+	DiscoverServers(ctx context.Context, in *DiscoverServersRequest, opts ...grpc.CallOption) (*DiscoverServersResponse, error)
+}
+
+type managerClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewManagerClient(cc grpc.ClientConnInterface) ManagerClient {
+	return &managerClient{cc}
+}
+
+func (c *managerClient) RegisterServer(ctx context.Context, in *RegisterServerRequest, opts ...grpc.CallOption) (*RegisterServerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RegisterServerResponse)
+	err := c.cc.Invoke(ctx, Manager_RegisterServer_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *managerClient) DiscoverServers(ctx context.Context, in *DiscoverServersRequest, opts ...grpc.CallOption) (*DiscoverServersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DiscoverServersResponse)
+	err := c.cc.Invoke(ctx, Manager_DiscoverServers_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ManagerServer is the server API for Manager service.
+// All implementations must embed UnimplementedManagerServer
+// for forward compatibility.
+type ManagerServer interface {
+	RegisterServer(context.Context, *RegisterServerRequest) (*RegisterServerResponse, error)
+	DiscoverServers(context.Context, *DiscoverServersRequest) (*DiscoverServersResponse, error)
+	mustEmbedUnimplementedManagerServer()
+}
+
+// UnimplementedManagerServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedManagerServer struct{}
+
+func (UnimplementedManagerServer) RegisterServer(context.Context, *RegisterServerRequest) (*RegisterServerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RegisterServer not implemented")
+}
+func (UnimplementedManagerServer) DiscoverServers(context.Context, *DiscoverServersRequest) (*DiscoverServersResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DiscoverServers not implemented")
+}
+func (UnimplementedManagerServer) mustEmbedUnimplementedManagerServer() {}
+func (UnimplementedManagerServer) testEmbeddedByValue()                 {}
+
+// UnsafeManagerServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to ManagerServer will
+// result in compilation errors.
+type UnsafeManagerServer interface {
+	mustEmbedUnimplementedManagerServer()
+}
+
+func RegisterManagerServer(s grpc.ServiceRegistrar, srv ManagerServer) {
+	// If the following call panics, it indicates UnimplementedManagerServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&Manager_ServiceDesc, srv)
+}
+
+func _Manager_RegisterServer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegisterServerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ManagerServer).RegisterServer(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Manager_RegisterServer_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ManagerServer).RegisterServer(ctx, req.(*RegisterServerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Manager_DiscoverServers_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DiscoverServersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ManagerServer).DiscoverServers(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Manager_DiscoverServers_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ManagerServer).DiscoverServers(ctx, req.(*DiscoverServersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// Manager_ServiceDesc is the grpc.ServiceDesc for Manager service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var Manager_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "kvstore.Manager",
+	HandlerType: (*ManagerServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "RegisterServer",
+			Handler:    _Manager_RegisterServer_Handler,
+		},
+		{
+			MethodName: "DiscoverServers",
+			Handler:    _Manager_DiscoverServers_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "kvstore.proto",
+}
