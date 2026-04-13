@@ -3,23 +3,23 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net"
-	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/btree"
-	"github.com/syndtr/goleveldb/leveldb"
-	"github.com/syndtr/goleveldb/leveldb/opt"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	pb "kvstore/pb"
+	"kvstore/raft"
 )
-
-var syncWrite = &opt.WriteOptions{Sync: true} //leveldb fsync before returning to client
 
 type kvItem struct {
 	key   string
@@ -30,215 +30,260 @@ func (a kvItem) Less(b btree.Item) bool {
 	return a.key < b.(kvItem).key
 }
 
+type kvStateMachine struct {
+	tree *btree.BTree
+}
+
+func newKVStateMachine() *kvStateMachine {
+	return &kvStateMachine{tree: btree.New(32)}
+}
+
+func (s *kvStateMachine) Apply(cmdBytes []byte) []byte {
+	cmd := &pb.KVCommand{}
+	if err := proto.Unmarshal(cmdBytes, cmd); err != nil {
+		log.Printf("state machine: bad command: %v", err)
+		return nil
+	}
+	res := &pb.KVResult{}
+	switch cmd.Op {
+	case pb.KVCommand_OP_PUT:
+		old := s.tree.ReplaceOrInsert(kvItem{key: cmd.Key, value: cmd.Value})
+		res.Found = old != nil
+	case pb.KVCommand_OP_SWAP:
+		old := s.tree.ReplaceOrInsert(kvItem{key: cmd.Key, value: cmd.Value})
+		if old != nil {
+			res.Found = true
+			res.Value = old.(kvItem).value
+		}
+	case pb.KVCommand_OP_DELETE:
+		old := s.tree.Delete(kvItem{key: cmd.Key})
+		res.Found = old != nil
+	case pb.KVCommand_OP_GET:
+		item := s.tree.Get(kvItem{key: cmd.Key})
+		if item != nil {
+			res.Found = true
+			res.Value = item.(kvItem).value
+		}
+	case pb.KVCommand_OP_SCAN:
+		s.tree.AscendGreaterOrEqual(kvItem{key: cmd.Key}, func(i btree.Item) bool {
+			kv := i.(kvItem)
+			if kv.key > cmd.KeyEnd {
+				return false
+			}
+			res.Entries = append(res.Entries, &pb.KeyValue{Key: kv.key, Value: kv.value})
+			return true
+		})
+	default:
+		log.Printf("state machine: unknown op %v", cmd.Op)
+	}
+	data, err := proto.Marshal(res)
+	if err != nil {
+		log.Printf("state machine: marshal: %v", err)
+		return nil
+	}
+	return data
+}
+
+const notLeaderPrefix = "NOT_LEADER:"
+
 type kvServer struct {
 	pb.UnimplementedKvStoreServer
-	mu      sync.RWMutex // RWMutex for better read performance
-	tree    *btree.BTree
-	db      *leveldb.DB // nil if no backer path
-	logging bool
+	raft *raft.Raft
 }
 
-func newKvServer(logging bool, backerPath string) *kvServer {
-	s := &kvServer{
-		tree:    btree.New(32),
-		logging: logging,
-	}
-
-	if backerPath != "" {
-		db, err := leveldb.OpenFile(backerPath, nil)
-		if err != nil {
-			log.Fatalf("failed to open LevelDB at %s: %v", backerPath, err)
-		}
-		s.db = db
-
-		//load all keys from LevelDB
-		iter := db.NewIterator(nil, nil)
-		count := 0
-		for iter.Next() {
-			s.tree.ReplaceOrInsert(kvItem{
-				key:   string(iter.Key()),
-				value: string(iter.Value()),
-			})
-			count++
-		}
-		iter.Release()
-		if err := iter.Error(); err != nil {
-			log.Fatalf("failed to iterate LevelDB: %v", err)
-		}
-
-		log.Printf("recovered %d keys from LevelDB", count)
-	}
-
-	return s
+func (s *kvServer) notLeaderErr() error {
+	return status.Errorf(codes.FailedPrecondition, "%s%d", notLeaderPrefix, s.raft.LeaderID())
 }
 
-func clientAddr(ctx context.Context) string {
-	if p, ok := peer.FromContext(ctx); ok {
-		return p.Addr.String()
+func (s *kvServer) proposeAndWait(cmd *pb.KVCommand) (*pb.KVResult, error) {
+	data, err := proto.Marshal(cmd)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "marshal: %v", err)
 	}
-	return "unknown"
-}
-
-func (s *kvServer) Put(ctx context.Context, req *pb.PutRequest) (*pb.PutResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.db != nil { //duh
-		if err := s.db.Put([]byte(req.Key), []byte(req.Value), syncWrite); err != nil {
-			return nil, err
+	ch, err := s.raft.Propose(data)
+	if err != nil {
+		if err == raft.ErrNotLeader {
+			return nil, s.notLeaderErr()
 		}
+		return nil, status.Errorf(codes.Internal, "raft: %v", err)
 	}
-
-	item := kvItem{key: req.Key, value: req.Value}
-	old := s.tree.ReplaceOrInsert(item)
-	found := old != nil
-	if s.logging {
-		log.Printf("[%s] PUT %s %s -> found=%v", clientAddr(ctx), req.Key, req.Value, found)
-	}
-	return &pb.PutResponse{Found: found}, nil
-}
-
-func (s *kvServer) Swap(ctx context.Context, req *pb.SwapRequest) (*pb.SwapResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.db != nil { //duh idk why I am not making this a function
-		if err := s.db.Put([]byte(req.Key), []byte(req.Value), syncWrite); err != nil {
-			return nil, err
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, s.notLeaderErr()
 		}
-	}
-
-	item := kvItem{key: req.Key, value: req.Value}
-	old := s.tree.ReplaceOrInsert(item)
-	resp := &pb.SwapResponse{}
-	if old != nil {
-		resp.Found = true
-		resp.OldValue = old.(kvItem).value
-	}
-	if s.logging {
-		log.Printf("[%s] SWAP %s %s -> found=%v old_value=%s", clientAddr(ctx), req.Key, req.Value, resp.Found, resp.OldValue)
-	}
-	return resp, nil
-}
-
-func (s *kvServer) Get(ctx context.Context, req *pb.GetRequest) (*pb.GetResponse, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	item := s.tree.Get(kvItem{key: req.Key})
-	resp := &pb.GetResponse{}
-	if item != nil {
-		resp.Found = true
-		resp.Value = item.(kvItem).value
-	}
-	if s.logging {
-		log.Printf("[%s] GET %s -> found=%v value=%s", clientAddr(ctx), req.Key, resp.Found, resp.Value)
-	}
-	return resp, nil
-}
-
-func (s *kvServer) Scan(ctx context.Context, req *pb.ScanRequest) (*pb.ScanResponse, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	var entries []*pb.KeyValue
-	s.tree.AscendGreaterOrEqual(kvItem{key: req.KeyStart}, func(i btree.Item) bool {
-		kv := i.(kvItem)
-		if kv.key > req.KeyEnd {
-			return false
+		kvRes := &pb.KVResult{}
+		if err := proto.Unmarshal(res.Data, kvRes); err != nil {
+			return nil, status.Errorf(codes.Internal, "unmarshal: %v", err)
 		}
-		entries = append(entries, &pb.KeyValue{Key: kv.key, Value: kv.value})
-		return true
+		return kvRes, nil
+	case <-time.After(10 * time.Second):
+		return nil, status.Errorf(codes.DeadlineExceeded, "raft apply timeout")
+	}
+}
+
+func (s *kvServer) Put(_ context.Context, req *pb.PutRequest) (*pb.PutResponse, error) {
+	res, err := s.proposeAndWait(&pb.KVCommand{
+		Op: pb.KVCommand_OP_PUT, Key: req.Key, Value: req.Value,
 	})
-	if s.logging {
-		log.Printf("[%s] SCAN %s %s -> %d entries", clientAddr(ctx), req.KeyStart, req.KeyEnd, len(entries))
+	if err != nil {
+		return nil, err
 	}
-	return &pb.ScanResponse{Entries: entries}, nil
+	return &pb.PutResponse{Found: res.Found}, nil
 }
 
-func (s *kvServer) Delete(ctx context.Context, req *pb.DeleteRequest) (*pb.DeleteResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	//delete from btree FIRST before deleting in leveldb for crash conssitency
-	old := s.tree.Delete(kvItem{key: req.Key})
-	found := old != nil
-
-	if s.db != nil && found {
-		if err := s.db.Delete([]byte(req.Key), syncWrite); err != nil {
-			// insert back if db write fail somehow
-			s.tree.ReplaceOrInsert(old.(kvItem))
-			return nil, err
-		}
+func (s *kvServer) Swap(_ context.Context, req *pb.SwapRequest) (*pb.SwapResponse, error) {
+	res, err := s.proposeAndWait(&pb.KVCommand{
+		Op: pb.KVCommand_OP_SWAP, Key: req.Key, Value: req.Value,
+	})
+	if err != nil {
+		return nil, err
 	}
-
-	if s.logging {
-		log.Printf("[%s] DELETE %s -> found=%v", clientAddr(ctx), req.Key, found)
-	}
-	return &pb.DeleteResponse{Found: found}, nil
+	return &pb.SwapResponse{Found: res.Found, OldValue: res.Value}, nil
 }
 
-func registerWithManager(managerAddr string, serverID int) {
-	for { //retry LOOP
-		conn, err := grpc.NewClient(managerAddr,
-			grpc.WithTransportCredentials(insecure.NewCredentials()))
-		if err != nil {
-			log.Printf("failed to connect to manager: %v, retrying...", err)
-			time.Sleep(time.Second)
-			continue
-		}
-
-		client := pb.NewManagerClient(conn)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		resp, err := client.RegisterServer(ctx, &pb.RegisterServerRequest{
-			Id: int32(serverID),
-		})
-		cancel()
-		conn.Close()
-
-		if err != nil {
-			log.Printf("failed to register with manager: %v, retrying...", err)
-			time.Sleep(time.Second)
-			continue
-		}
-
-		log.Printf("registered with manager as server %d (accepted=%v)", serverID, resp.Accepted)
-		return
+func (s *kvServer) Get(_ context.Context, req *pb.GetRequest) (*pb.GetResponse, error) {
+	res, err := s.proposeAndWait(&pb.KVCommand{
+		Op: pb.KVCommand_OP_GET, Key: req.Key,
+	})
+	if err != nil {
+		return nil, err
 	}
+	return &pb.GetResponse{Found: res.Found, Value: res.Value}, nil
+}
+
+func (s *kvServer) Delete(_ context.Context, req *pb.DeleteRequest) (*pb.DeleteResponse, error) {
+	res, err := s.proposeAndWait(&pb.KVCommand{
+		Op: pb.KVCommand_OP_DELETE, Key: req.Key,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &pb.DeleteResponse{Found: res.Found}, nil
+}
+
+func (s *kvServer) Scan(_ context.Context, req *pb.ScanRequest) (*pb.ScanResponse, error) {
+	res, err := s.proposeAndWait(&pb.KVCommand{
+		Op: pb.KVCommand_OP_SCAN, Key: req.KeyStart, KeyEnd: req.KeyEnd,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &pb.ScanResponse{Entries: res.Entries}, nil
+}
+
+func registerWithManagers(managers []string, partID, repID int32) {
+	req := &pb.RegisterServerRequest{PartitionId: partID, ReplicaId: repID}
+	for attempt := 0; ; attempt++ {
+		for _, addr := range managers {
+			conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			if err != nil {
+				continue
+			}
+			client := pb.NewManagerClient(conn)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_, err = client.RegisterServer(ctx, req)
+			cancel()
+			conn.Close()
+			if err == nil {
+				log.Printf("registered with manager %s as p=%d r=%d", addr, partID, repID)
+				return
+			}
+		}
+		time.Sleep(time.Second)
+	}
+}
+
+func parsePeerAddrs(raw string, myID int32) (map[int32]string, int) {
+	if raw == "" || raw == "none" {
+		return map[int32]string{}, 1
+	}
+	parts := strings.Split(raw, ",")
+	rf := len(parts) + 1
+	out := make(map[int32]string, len(parts))
+	j := 0
+	for i := 0; i < rf; i++ {
+		if int32(i) == myID {
+			continue
+		}
+		out[int32(i)] = strings.TrimSpace(parts[j])
+		j++
+	}
+	return out, rf
 }
 
 func main() {
-	listen := flag.String("listen", "0.0.0.0:3777", "listen address")
-	backer := flag.String("backer", "", "path to durable storage directory")
-	logging := flag.Bool("log", false, "enable operation logging")
-	id := flag.String("id", "0", "server id")
-	manager := flag.String("manager", "", "manager address")
+	partitionID := flag.Int("partition_id", 0, "partition index")
+	replicaID := flag.Int("replica_id", 0, "replica index within the partition")
+	managerAddrs := flag.String("manager_addrs", "", "comma-separated manager API addresses")
+	apiListen := flag.String("api_listen", "0.0.0.0:3777", "client KV API listen address")
+	p2pListen := flag.String("p2p_listen", "0.0.0.0:3707", "raft peer listen address")
+	peerAddrs := flag.String("peer_addrs", "none", "comma-separated peer p2p addresses ('none' if rf=1)")
+	backerPath := flag.String("backer_path", "", "durable storage directory for this replica")
 	flag.Parse()
 
-	serverID, err := strconv.Atoi(*id)
+	if *backerPath == "" {
+		log.Fatal("--backer_path is required")
+	}
+	partID := int32(*partitionID)
+	repID := int32(*replicaID)
+
+	peerMap, rf := parsePeerAddrs(*peerAddrs, repID)
+	log.Printf("partition=%d replica=%d rf=%d peers=%v backer=%s",
+		partID, repID, rf, peerMap, *backerPath)
+
+	apiLis, err := net.Listen("tcp", *apiListen)
 	if err != nil {
-		log.Fatalf("invalid server id %q: %v", *id, err)
+		log.Fatalf("listen api %s: %v", *apiListen, err)
 	}
-
-	lis, err := net.Listen("tcp", *listen)
+	p2pLis, err := net.Listen("tcp", *p2pListen)
 	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
+		log.Fatalf("listen p2p %s: %v", *p2pListen, err)
 	}
 
-	srv := newKvServer(*logging, *backer)
-	if srv.db != nil {
-		defer srv.db.Close()
+	sm := newKVStateMachine()
+
+	logger := log.New(log.Writer(), fmt.Sprintf("[raft p=%d r=%d] ", partID, repID), log.LstdFlags|log.Lmicroseconds)
+	rft, err := raft.NewRaft(raft.Config{
+		ID:         repID,
+		NumPeers:   rf,
+		PeerAddrs:  peerMap,
+		BackerPath: *backerPath,
+		SM:         sm,
+		Logger:     logger,
+	})
+	if err != nil {
+		log.Fatalf("raft init: %v", err)
 	}
 
-	grpcServer := grpc.NewServer()
-	pb.RegisterKvStoreServer(grpcServer, srv)
+	kvSrv := &kvServer{raft: rft}
 
-	if *manager != "" {
-		go registerWithManager(*manager, serverID)
+	p2pGRPC := grpc.NewServer()
+	pb.RegisterRaftServer(p2pGRPC, rft)
+	go func() {
+		if err := p2pGRPC.Serve(p2pLis); err != nil {
+			log.Printf("p2p serve: %v", err)
+		}
+	}()
+
+	rft.Start()
+
+	if *managerAddrs != "" {
+		managers := strings.Split(*managerAddrs, ",")
+		go registerWithManagers(managers, partID, repID)
 	}
 
-	log.Printf("server %d listening on %s", serverID, *listen)
-	if err := grpcServer.Serve(lis); err != nil {
-		log.Fatalf("failed to serve: %v", err)
-	}
+	apiGRPC := grpc.NewServer()
+	pb.RegisterKvStoreServer(apiGRPC, kvSrv)
+	log.Printf("kvserver p=%d r=%d api=%s p2p=%s", partID, repID, *apiListen, *p2pListen)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := apiGRPC.Serve(apiLis); err != nil {
+			log.Printf("api serve: %v", err)
+		}
+	}()
+	wg.Wait()
 }

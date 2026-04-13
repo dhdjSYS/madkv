@@ -5,7 +5,6 @@ import (
 	"flag"
 	"log"
 	"net"
-	"sort"
 	"strings"
 	"sync"
 
@@ -14,22 +13,25 @@ import (
 	pb "kvstore/pb"
 )
 
-//grader: I use hash partitioning, thus the manager does not share partitioning rules with the server or client, it is all
-//calculated by the client given the number of servers
-
 type managerServer struct {
 	pb.UnimplementedManagerServer
-	mu            sync.Mutex
-	expectedAddrs []string
-	registered    map[int32]string // id -> address
-	allReady      chan struct{}
-	readyClosed   bool
+
+	rf            int32
+	numPartitions int
+	serverAddrs   []string
+
+	mu          sync.Mutex
+	registered  map[[2]int32]bool
+	allReady    chan struct{}
+	readyClosed bool
 }
 
-func newManager(servers []string) *managerServer {
+func newManager(rf int32, servers []string) *managerServer {
 	return &managerServer{
-		expectedAddrs: servers,
-		registered:    make(map[int32]string),
+		rf:            rf,
+		numPartitions: len(servers) / int(rf),
+		serverAddrs:   servers,
+		registered:    make(map[[2]int32]bool),
 		allReady:      make(chan struct{}),
 	}
 }
@@ -38,18 +40,19 @@ func (m *managerServer) RegisterServer(_ context.Context, req *pb.RegisterServer
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	id := req.Id
-	if int(id) < len(m.expectedAddrs) {
-		m.registered[id] = m.expectedAddrs[id]
+	key := [2]int32{req.PartitionId, req.ReplicaId}
+	if !m.registered[key] {
+		m.registered[key] = true
+		log.Printf("register p=%d r=%d (%d/%d)",
+			req.PartitionId, req.ReplicaId, len(m.registered), len(m.serverAddrs))
+	} else {
+		log.Printf("re-register p=%d r=%d (recovery)",
+			req.PartitionId, req.ReplicaId)
 	}
-
-	log.Printf("server %d registered (%d/%d)", id, len(m.registered), len(m.expectedAddrs))
-
-	if len(m.registered) == len(m.expectedAddrs) && !m.readyClosed {
+	if len(m.registered) >= len(m.serverAddrs) && !m.readyClosed {
 		close(m.allReady)
 		m.readyClosed = true
 	}
-
 	return &pb.RegisterServerResponse{Accepted: true}, nil
 }
 
@@ -60,37 +63,64 @@ func (m *managerServer) DiscoverServers(ctx context.Context, _ *pb.DiscoverServe
 		return nil, ctx.Err()
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	var infos []*pb.ServerInfo
-	for id, addr := range m.registered {
-		infos = append(infos, &pb.ServerInfo{Id: id, Address: addr})
+	groups := make([]*pb.PartitionGroup, m.numPartitions)
+	for p := 0; p < m.numPartitions; p++ {
+		group := &pb.PartitionGroup{PartitionId: int32(p)}
+		for r := int32(0); r < m.rf; r++ {
+			idx := p*int(m.rf) + int(r)
+			group.Replicas = append(group.Replicas, &pb.ServerInfo{
+				ReplicaId: r,
+				Address:   m.serverAddrs[idx],
+			})
+		}
+		groups[p] = group
 	}
-	sort.Slice(infos, func(i, j int) bool {
-		return infos[i].Id < infos[j].Id
-	})
-
-	return &pb.DiscoverServersResponse{Servers: infos}, nil
+	return &pb.DiscoverServersResponse{
+		NumPartitions:     int32(m.numPartitions),
+		ReplicationFactor: m.rf,
+		Partitions:        groups,
+	}, nil
 }
 
 func main() {
-	listen := flag.String("listen", "0.0.0.0:3666", "listen address")
-	servers := flag.String("servers", "", "comma-separated server addresses")
+	replicaID := flag.Int("replica_id", 0, "manager replica index (must be 0 in non-replicated mode)")
+	manListen := flag.String("man_listen", "0.0.0.0:3666", "client/server API listen address")
+	p2pListen := flag.String("p2p_listen", "0.0.0.0:3606", "manager peer listen address (ignored in non-replicated mode)")
+	peerAddrs := flag.String("peer_addrs", "none", "comma-separated manager peers, or 'none' (ignored in non-replicated mode)")
+	serverRF := flag.Int("server_rf", 1, "replication factor of data servers")
+	serverAddrs := flag.String("server_addrs", "", "comma-separated server API addresses: partition-major ordering")
+	backerPath := flag.String("backer_path", "", "durable storage directory (unused in non-replicated mode)")
 	flag.Parse()
 
-	serverList := strings.Split(*servers, ",")
+	_ = p2pListen
+	_ = peerAddrs
+	_ = backerPath
 
-	lis, err := net.Listen("tcp", *listen)
-	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
+	if *replicaID != 0 {
+		log.Printf("manager replica %d: non-replicated mode, idling", *replicaID)
+		select {}
 	}
 
-	grpcServer := grpc.NewServer()
-	pb.RegisterManagerServer(grpcServer, newManager(serverList))
+	if *serverAddrs == "" {
+		log.Fatal("--server_addrs is required")
+	}
+	servers := strings.Split(*serverAddrs, ",")
+	if *serverRF <= 0 || len(servers)%*serverRF != 0 {
+		log.Fatalf("server count %d not a multiple of server_rf %d", len(servers), *serverRF)
+	}
 
-	log.Printf("manager listening on %s, expecting %d servers", *listen, len(serverList))
+	lis, err := net.Listen("tcp", *manListen)
+	if err != nil {
+		log.Fatalf("listen %s: %v", *manListen, err)
+	}
+
+	mgr := newManager(int32(*serverRF), servers)
+	grpcServer := grpc.NewServer()
+	pb.RegisterManagerServer(grpcServer, mgr)
+
+	log.Printf("manager listening on %s, %d partitions rf=%d (%d servers)",
+		*manListen, mgr.numPartitions, mgr.rf, len(servers))
 	if err := grpcServer.Serve(lis); err != nil {
-		log.Fatalf("failed to serve: %v", err)
+		log.Fatalf("serve: %v", err)
 	}
 }

@@ -21,6 +21,64 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type KVCommand_Op int32
+
+const (
+	KVCommand_OP_UNKNOWN KVCommand_Op = 0
+	KVCommand_OP_PUT     KVCommand_Op = 1
+	KVCommand_OP_SWAP    KVCommand_Op = 2
+	KVCommand_OP_DELETE  KVCommand_Op = 3
+	KVCommand_OP_GET     KVCommand_Op = 4
+	KVCommand_OP_SCAN    KVCommand_Op = 5
+)
+
+// Enum value maps for KVCommand_Op.
+var (
+	KVCommand_Op_name = map[int32]string{
+		0: "OP_UNKNOWN",
+		1: "OP_PUT",
+		2: "OP_SWAP",
+		3: "OP_DELETE",
+		4: "OP_GET",
+		5: "OP_SCAN",
+	}
+	KVCommand_Op_value = map[string]int32{
+		"OP_UNKNOWN": 0,
+		"OP_PUT":     1,
+		"OP_SWAP":    2,
+		"OP_DELETE":  3,
+		"OP_GET":     4,
+		"OP_SCAN":    5,
+	}
+)
+
+func (x KVCommand_Op) Enum() *KVCommand_Op {
+	p := new(KVCommand_Op)
+	*p = x
+	return p
+}
+
+func (x KVCommand_Op) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (KVCommand_Op) Descriptor() protoreflect.EnumDescriptor {
+	return file_kvstore_proto_enumTypes[0].Descriptor()
+}
+
+func (KVCommand_Op) Type() protoreflect.EnumType {
+	return &file_kvstore_proto_enumTypes[0]
+}
+
+func (x KVCommand_Op) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use KVCommand_Op.Descriptor instead.
+func (KVCommand_Op) EnumDescriptor() ([]byte, []int) {
+	return file_kvstore_proto_rawDescGZIP(), []int{17, 0}
+}
+
 type PutRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
@@ -555,7 +613,8 @@ func (x *DeleteResponse) GetFound() bool {
 
 type RegisterServerRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            int32                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	PartitionId   int32                  `protobuf:"varint,1,opt,name=partition_id,json=partitionId,proto3" json:"partition_id,omitempty"`
+	ReplicaId     int32                  `protobuf:"varint,2,opt,name=replica_id,json=replicaId,proto3" json:"replica_id,omitempty"` //new replica id for p3
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -590,9 +649,16 @@ func (*RegisterServerRequest) Descriptor() ([]byte, []int) {
 	return file_kvstore_proto_rawDescGZIP(), []int{11}
 }
 
-func (x *RegisterServerRequest) GetId() int32 {
+func (x *RegisterServerRequest) GetPartitionId() int32 {
 	if x != nil {
-		return x.Id
+		return x.PartitionId
+	}
+	return 0
+}
+
+func (x *RegisterServerRequest) GetReplicaId() int32 {
+	if x != nil {
+		return x.ReplicaId
 	}
 	return 0
 }
@@ -677,11 +743,16 @@ func (*DiscoverServersRequest) Descriptor() ([]byte, []int) {
 	return file_kvstore_proto_rawDescGZIP(), []int{13}
 }
 
+// DiscoverServersResponse carries the static partition layout. Each
+// PartitionGroup lists all replicas for a partition; clients pick one to send
+// requests to and follow NOT_LEADER redirects until they find the leader.
 type DiscoverServersResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Servers       []*ServerInfo          `protobuf:"bytes,1,rep,name=servers,proto3" json:"servers,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	NumPartitions     int32                  `protobuf:"varint,1,opt,name=num_partitions,json=numPartitions,proto3" json:"num_partitions,omitempty"`
+	ReplicationFactor int32                  `protobuf:"varint,2,opt,name=replication_factor,json=replicationFactor,proto3" json:"replication_factor,omitempty"`
+	Partitions        []*PartitionGroup      `protobuf:"bytes,3,rep,name=partitions,proto3" json:"partitions,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *DiscoverServersResponse) Reset() {
@@ -714,16 +785,82 @@ func (*DiscoverServersResponse) Descriptor() ([]byte, []int) {
 	return file_kvstore_proto_rawDescGZIP(), []int{14}
 }
 
-func (x *DiscoverServersResponse) GetServers() []*ServerInfo {
+func (x *DiscoverServersResponse) GetNumPartitions() int32 {
 	if x != nil {
-		return x.Servers
+		return x.NumPartitions
+	}
+	return 0
+}
+
+func (x *DiscoverServersResponse) GetReplicationFactor() int32 {
+	if x != nil {
+		return x.ReplicationFactor
+	}
+	return 0
+}
+
+func (x *DiscoverServersResponse) GetPartitions() []*PartitionGroup {
+	if x != nil {
+		return x.Partitions
+	}
+	return nil
+}
+
+type PartitionGroup struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PartitionId   int32                  `protobuf:"varint,1,opt,name=partition_id,json=partitionId,proto3" json:"partition_id,omitempty"`
+	Replicas      []*ServerInfo          `protobuf:"bytes,2,rep,name=replicas,proto3" json:"replicas,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PartitionGroup) Reset() {
+	*x = PartitionGroup{}
+	mi := &file_kvstore_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PartitionGroup) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PartitionGroup) ProtoMessage() {}
+
+func (x *PartitionGroup) ProtoReflect() protoreflect.Message {
+	mi := &file_kvstore_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PartitionGroup.ProtoReflect.Descriptor instead.
+func (*PartitionGroup) Descriptor() ([]byte, []int) {
+	return file_kvstore_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *PartitionGroup) GetPartitionId() int32 {
+	if x != nil {
+		return x.PartitionId
+	}
+	return 0
+}
+
+func (x *PartitionGroup) GetReplicas() []*ServerInfo {
+	if x != nil {
+		return x.Replicas
 	}
 	return nil
 }
 
 type ServerInfo struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            int32                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	ReplicaId     int32                  `protobuf:"varint,1,opt,name=replica_id,json=replicaId,proto3" json:"replica_id,omitempty"`
 	Address       string                 `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -731,7 +868,7 @@ type ServerInfo struct {
 
 func (x *ServerInfo) Reset() {
 	*x = ServerInfo{}
-	mi := &file_kvstore_proto_msgTypes[15]
+	mi := &file_kvstore_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -743,7 +880,7 @@ func (x *ServerInfo) String() string {
 func (*ServerInfo) ProtoMessage() {}
 
 func (x *ServerInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_kvstore_proto_msgTypes[15]
+	mi := &file_kvstore_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -756,12 +893,12 @@ func (x *ServerInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerInfo.ProtoReflect.Descriptor instead.
 func (*ServerInfo) Descriptor() ([]byte, []int) {
-	return file_kvstore_proto_rawDescGZIP(), []int{15}
+	return file_kvstore_proto_rawDescGZIP(), []int{16}
 }
 
-func (x *ServerInfo) GetId() int32 {
+func (x *ServerInfo) GetReplicaId() int32 {
 	if x != nil {
-		return x.Id
+		return x.ReplicaId
 	}
 	return 0
 }
@@ -771,6 +908,480 @@ func (x *ServerInfo) GetAddress() string {
 		return x.Address
 	}
 	return ""
+}
+
+// KVCommand is the state machine command serialized into the Raft log.
+type KVCommand struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Op            KVCommand_Op           `protobuf:"varint,1,opt,name=op,proto3,enum=kvstore.KVCommand_Op" json:"op,omitempty"`
+	Key           string                 `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	Value         string                 `protobuf:"bytes,3,opt,name=value,proto3" json:"value,omitempty"`
+	KeyEnd        string                 `protobuf:"bytes,4,opt,name=key_end,json=keyEnd,proto3" json:"key_end,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *KVCommand) Reset() {
+	*x = KVCommand{}
+	mi := &file_kvstore_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *KVCommand) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*KVCommand) ProtoMessage() {}
+
+func (x *KVCommand) ProtoReflect() protoreflect.Message {
+	mi := &file_kvstore_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use KVCommand.ProtoReflect.Descriptor instead.
+func (*KVCommand) Descriptor() ([]byte, []int) {
+	return file_kvstore_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *KVCommand) GetOp() KVCommand_Op {
+	if x != nil {
+		return x.Op
+	}
+	return KVCommand_OP_UNKNOWN
+}
+
+func (x *KVCommand) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *KVCommand) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
+}
+
+func (x *KVCommand) GetKeyEnd() string {
+	if x != nil {
+		return x.KeyEnd
+	}
+	return ""
+}
+
+// KVResult mirrors the union of KV response types. Stored on the leader's
+// waiter channel and returned to the RPC handler after the entry is applied.
+type KVResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Found         bool                   `protobuf:"varint,1,opt,name=found,proto3" json:"found,omitempty"`
+	Value         string                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	Entries       []*KeyValue            `protobuf:"bytes,3,rep,name=entries,proto3" json:"entries,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *KVResult) Reset() {
+	*x = KVResult{}
+	mi := &file_kvstore_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *KVResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*KVResult) ProtoMessage() {}
+
+func (x *KVResult) ProtoReflect() protoreflect.Message {
+	mi := &file_kvstore_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use KVResult.ProtoReflect.Descriptor instead.
+func (*KVResult) Descriptor() ([]byte, []int) {
+	return file_kvstore_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *KVResult) GetFound() bool {
+	if x != nil {
+		return x.Found
+	}
+	return false
+}
+
+func (x *KVResult) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
+}
+
+func (x *KVResult) GetEntries() []*KeyValue {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
+// LogEntry is a single Raft log entry as persisted and shipped over the wire.
+type LogEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Index         int64                  `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
+	Term          int64                  `protobuf:"varint,2,opt,name=term,proto3" json:"term,omitempty"`
+	Command       []byte                 `protobuf:"bytes,3,opt,name=command,proto3" json:"command,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LogEntry) Reset() {
+	*x = LogEntry{}
+	mi := &file_kvstore_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LogEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LogEntry) ProtoMessage() {}
+
+func (x *LogEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_kvstore_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LogEntry.ProtoReflect.Descriptor instead.
+func (*LogEntry) Descriptor() ([]byte, []int) {
+	return file_kvstore_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *LogEntry) GetIndex() int64 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+func (x *LogEntry) GetTerm() int64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *LogEntry) GetCommand() []byte {
+	if x != nil {
+		return x.Command
+	}
+	return nil
+}
+
+type RequestVoteRequest struct {
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Term         int64                  `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
+	CandidateId  int32                  `protobuf:"varint,2,opt,name=candidate_id,json=candidateId,proto3" json:"candidate_id,omitempty"`
+	LastLogIndex int64                  `protobuf:"varint,3,opt,name=last_log_index,json=lastLogIndex,proto3" json:"last_log_index,omitempty"`
+	LastLogTerm  int64                  `protobuf:"varint,4,opt,name=last_log_term,json=lastLogTerm,proto3" json:"last_log_term,omitempty"`
+	// pre_vote marks a PreVote probe (§9.6 of Ongaro's thesis): the candidate is
+	// asking peers whether they would grant a vote at this hypothetical term
+	// without actually bumping its own currentTerm. Peers must NOT update their
+	// persistent state or grant the vote, and the pre-candidate must NOT step
+	// down on seeing a higher term in the response. Only if a majority would
+	// grant a real vote does the pre-candidate promote to a real election.
+	PreVote       bool `protobuf:"varint,5,opt,name=pre_vote,json=preVote,proto3" json:"pre_vote,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RequestVoteRequest) Reset() {
+	*x = RequestVoteRequest{}
+	mi := &file_kvstore_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RequestVoteRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RequestVoteRequest) ProtoMessage() {}
+
+func (x *RequestVoteRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_kvstore_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RequestVoteRequest.ProtoReflect.Descriptor instead.
+func (*RequestVoteRequest) Descriptor() ([]byte, []int) {
+	return file_kvstore_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *RequestVoteRequest) GetTerm() int64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *RequestVoteRequest) GetCandidateId() int32 {
+	if x != nil {
+		return x.CandidateId
+	}
+	return 0
+}
+
+func (x *RequestVoteRequest) GetLastLogIndex() int64 {
+	if x != nil {
+		return x.LastLogIndex
+	}
+	return 0
+}
+
+func (x *RequestVoteRequest) GetLastLogTerm() int64 {
+	if x != nil {
+		return x.LastLogTerm
+	}
+	return 0
+}
+
+func (x *RequestVoteRequest) GetPreVote() bool {
+	if x != nil {
+		return x.PreVote
+	}
+	return false
+}
+
+type RequestVoteResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Term          int64                  `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
+	VoteGranted   bool                   `protobuf:"varint,2,opt,name=vote_granted,json=voteGranted,proto3" json:"vote_granted,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RequestVoteResponse) Reset() {
+	*x = RequestVoteResponse{}
+	mi := &file_kvstore_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RequestVoteResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RequestVoteResponse) ProtoMessage() {}
+
+func (x *RequestVoteResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_kvstore_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RequestVoteResponse.ProtoReflect.Descriptor instead.
+func (*RequestVoteResponse) Descriptor() ([]byte, []int) {
+	return file_kvstore_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *RequestVoteResponse) GetTerm() int64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *RequestVoteResponse) GetVoteGranted() bool {
+	if x != nil {
+		return x.VoteGranted
+	}
+	return false
+}
+
+type AppendEntriesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Term          int64                  `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
+	LeaderId      int32                  `protobuf:"varint,2,opt,name=leader_id,json=leaderId,proto3" json:"leader_id,omitempty"`
+	PrevLogIndex  int64                  `protobuf:"varint,3,opt,name=prev_log_index,json=prevLogIndex,proto3" json:"prev_log_index,omitempty"`
+	PrevLogTerm   int64                  `protobuf:"varint,4,opt,name=prev_log_term,json=prevLogTerm,proto3" json:"prev_log_term,omitempty"`
+	Entries       []*LogEntry            `protobuf:"bytes,5,rep,name=entries,proto3" json:"entries,omitempty"`
+	LeaderCommit  int64                  `protobuf:"varint,6,opt,name=leader_commit,json=leaderCommit,proto3" json:"leader_commit,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AppendEntriesRequest) Reset() {
+	*x = AppendEntriesRequest{}
+	mi := &file_kvstore_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AppendEntriesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AppendEntriesRequest) ProtoMessage() {}
+
+func (x *AppendEntriesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_kvstore_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AppendEntriesRequest.ProtoReflect.Descriptor instead.
+func (*AppendEntriesRequest) Descriptor() ([]byte, []int) {
+	return file_kvstore_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *AppendEntriesRequest) GetTerm() int64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *AppendEntriesRequest) GetLeaderId() int32 {
+	if x != nil {
+		return x.LeaderId
+	}
+	return 0
+}
+
+func (x *AppendEntriesRequest) GetPrevLogIndex() int64 {
+	if x != nil {
+		return x.PrevLogIndex
+	}
+	return 0
+}
+
+func (x *AppendEntriesRequest) GetPrevLogTerm() int64 {
+	if x != nil {
+		return x.PrevLogTerm
+	}
+	return 0
+}
+
+func (x *AppendEntriesRequest) GetEntries() []*LogEntry {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
+func (x *AppendEntriesRequest) GetLeaderCommit() int64 {
+	if x != nil {
+		return x.LeaderCommit
+	}
+	return 0
+}
+
+type AppendEntriesResponse struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Term    int64                  `protobuf:"varint,1,opt,name=term,proto3" json:"term,omitempty"`
+	Success bool                   `protobuf:"varint,2,opt,name=success,proto3" json:"success,omitempty"`
+	// conflict_index is an optimization from the paper's §5.3 footnote: when an
+	// AppendEntries fails because of log inconsistency, the follower tells the
+	// leader the first index of the conflicting term (or its log length) so the
+	// leader can skip past an entire term's worth of entries in one step.
+	ConflictIndex int64 `protobuf:"varint,3,opt,name=conflict_index,json=conflictIndex,proto3" json:"conflict_index,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AppendEntriesResponse) Reset() {
+	*x = AppendEntriesResponse{}
+	mi := &file_kvstore_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AppendEntriesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AppendEntriesResponse) ProtoMessage() {}
+
+func (x *AppendEntriesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_kvstore_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AppendEntriesResponse.ProtoReflect.Descriptor instead.
+func (*AppendEntriesResponse) Descriptor() ([]byte, []int) {
+	return file_kvstore_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *AppendEntriesResponse) GetTerm() int64 {
+	if x != nil {
+		return x.Term
+	}
+	return 0
+}
+
+func (x *AppendEntriesResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *AppendEntriesResponse) GetConflictIndex() int64 {
+	if x != nil {
+		return x.ConflictIndex
+	}
+	return 0
 }
 
 var File_kvstore_proto protoreflect.FileDescriptor
@@ -807,18 +1418,71 @@ const file_kvstore_proto_rawDesc = "" +
 	"\rDeleteRequest\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\"&\n" +
 	"\x0eDeleteResponse\x12\x14\n" +
-	"\x05found\x18\x01 \x01(\bR\x05found\"'\n" +
-	"\x15RegisterServerRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\x05R\x02id\"4\n" +
+	"\x05found\x18\x01 \x01(\bR\x05found\"Y\n" +
+	"\x15RegisterServerRequest\x12!\n" +
+	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\x12\x1d\n" +
+	"\n" +
+	"replica_id\x18\x02 \x01(\x05R\treplicaId\"4\n" +
 	"\x16RegisterServerResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\"\x18\n" +
-	"\x16DiscoverServersRequest\"H\n" +
-	"\x17DiscoverServersResponse\x12-\n" +
-	"\aservers\x18\x01 \x03(\v2\x13.kvstore.ServerInfoR\aservers\"6\n" +
+	"\x16DiscoverServersRequest\"\xa8\x01\n" +
+	"\x17DiscoverServersResponse\x12%\n" +
+	"\x0enum_partitions\x18\x01 \x01(\x05R\rnumPartitions\x12-\n" +
+	"\x12replication_factor\x18\x02 \x01(\x05R\x11replicationFactor\x127\n" +
 	"\n" +
-	"ServerInfo\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\x05R\x02id\x12\x18\n" +
-	"\aaddress\x18\x02 \x01(\tR\aaddress2\x92\x02\n" +
+	"partitions\x18\x03 \x03(\v2\x17.kvstore.PartitionGroupR\n" +
+	"partitions\"d\n" +
+	"\x0ePartitionGroup\x12!\n" +
+	"\fpartition_id\x18\x01 \x01(\x05R\vpartitionId\x12/\n" +
+	"\breplicas\x18\x02 \x03(\v2\x13.kvstore.ServerInfoR\breplicas\"E\n" +
+	"\n" +
+	"ServerInfo\x12\x1d\n" +
+	"\n" +
+	"replica_id\x18\x01 \x01(\x05R\treplicaId\x12\x18\n" +
+	"\aaddress\x18\x02 \x01(\tR\aaddress\"\xca\x01\n" +
+	"\tKVCommand\x12%\n" +
+	"\x02op\x18\x01 \x01(\x0e2\x15.kvstore.KVCommand.OpR\x02op\x12\x10\n" +
+	"\x03key\x18\x02 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x03 \x01(\tR\x05value\x12\x17\n" +
+	"\akey_end\x18\x04 \x01(\tR\x06keyEnd\"U\n" +
+	"\x02Op\x12\x0e\n" +
+	"\n" +
+	"OP_UNKNOWN\x10\x00\x12\n" +
+	"\n" +
+	"\x06OP_PUT\x10\x01\x12\v\n" +
+	"\aOP_SWAP\x10\x02\x12\r\n" +
+	"\tOP_DELETE\x10\x03\x12\n" +
+	"\n" +
+	"\x06OP_GET\x10\x04\x12\v\n" +
+	"\aOP_SCAN\x10\x05\"c\n" +
+	"\bKVResult\x12\x14\n" +
+	"\x05found\x18\x01 \x01(\bR\x05found\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\x12+\n" +
+	"\aentries\x18\x03 \x03(\v2\x11.kvstore.KeyValueR\aentries\"N\n" +
+	"\bLogEntry\x12\x14\n" +
+	"\x05index\x18\x01 \x01(\x03R\x05index\x12\x12\n" +
+	"\x04term\x18\x02 \x01(\x03R\x04term\x12\x18\n" +
+	"\acommand\x18\x03 \x01(\fR\acommand\"\xb0\x01\n" +
+	"\x12RequestVoteRequest\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x03R\x04term\x12!\n" +
+	"\fcandidate_id\x18\x02 \x01(\x05R\vcandidateId\x12$\n" +
+	"\x0elast_log_index\x18\x03 \x01(\x03R\flastLogIndex\x12\"\n" +
+	"\rlast_log_term\x18\x04 \x01(\x03R\vlastLogTerm\x12\x19\n" +
+	"\bpre_vote\x18\x05 \x01(\bR\apreVote\"L\n" +
+	"\x13RequestVoteResponse\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x03R\x04term\x12!\n" +
+	"\fvote_granted\x18\x02 \x01(\bR\vvoteGranted\"\xe3\x01\n" +
+	"\x14AppendEntriesRequest\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x03R\x04term\x12\x1b\n" +
+	"\tleader_id\x18\x02 \x01(\x05R\bleaderId\x12$\n" +
+	"\x0eprev_log_index\x18\x03 \x01(\x03R\fprevLogIndex\x12\"\n" +
+	"\rprev_log_term\x18\x04 \x01(\x03R\vprevLogTerm\x12+\n" +
+	"\aentries\x18\x05 \x03(\v2\x11.kvstore.LogEntryR\aentries\x12#\n" +
+	"\rleader_commit\x18\x06 \x01(\x03R\fleaderCommit\"l\n" +
+	"\x15AppendEntriesResponse\x12\x12\n" +
+	"\x04term\x18\x01 \x01(\x03R\x04term\x12\x18\n" +
+	"\asuccess\x18\x02 \x01(\bR\asuccess\x12%\n" +
+	"\x0econflict_index\x18\x03 \x01(\x03R\rconflictIndex2\x92\x02\n" +
 	"\aKvStore\x120\n" +
 	"\x03Put\x12\x13.kvstore.PutRequest\x1a\x14.kvstore.PutResponse\x123\n" +
 	"\x04Swap\x12\x14.kvstore.SwapRequest\x1a\x15.kvstore.SwapResponse\x120\n" +
@@ -827,7 +1491,10 @@ const file_kvstore_proto_rawDesc = "" +
 	"\x06Delete\x12\x16.kvstore.DeleteRequest\x1a\x17.kvstore.DeleteResponse2\xb2\x01\n" +
 	"\aManager\x12Q\n" +
 	"\x0eRegisterServer\x12\x1e.kvstore.RegisterServerRequest\x1a\x1f.kvstore.RegisterServerResponse\x12T\n" +
-	"\x0fDiscoverServers\x12\x1f.kvstore.DiscoverServersRequest\x1a .kvstore.DiscoverServersResponseB\fZ\n" +
+	"\x0fDiscoverServers\x12\x1f.kvstore.DiscoverServersRequest\x1a .kvstore.DiscoverServersResponse2\xa0\x01\n" +
+	"\x04Raft\x12H\n" +
+	"\vRequestVote\x12\x1b.kvstore.RequestVoteRequest\x1a\x1c.kvstore.RequestVoteResponse\x12N\n" +
+	"\rAppendEntries\x12\x1d.kvstore.AppendEntriesRequest\x1a\x1e.kvstore.AppendEntriesResponseB\fZ\n" +
 	"kvstore/pbb\x06proto3"
 
 var (
@@ -842,47 +1509,65 @@ func file_kvstore_proto_rawDescGZIP() []byte {
 	return file_kvstore_proto_rawDescData
 }
 
-var file_kvstore_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_kvstore_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_kvstore_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
 var file_kvstore_proto_goTypes = []any{
-	(*PutRequest)(nil),              // 0: kvstore.PutRequest
-	(*PutResponse)(nil),             // 1: kvstore.PutResponse
-	(*SwapRequest)(nil),             // 2: kvstore.SwapRequest
-	(*SwapResponse)(nil),            // 3: kvstore.SwapResponse
-	(*GetRequest)(nil),              // 4: kvstore.GetRequest
-	(*GetResponse)(nil),             // 5: kvstore.GetResponse
-	(*ScanRequest)(nil),             // 6: kvstore.ScanRequest
-	(*ScanResponse)(nil),            // 7: kvstore.ScanResponse
-	(*KeyValue)(nil),                // 8: kvstore.KeyValue
-	(*DeleteRequest)(nil),           // 9: kvstore.DeleteRequest
-	(*DeleteResponse)(nil),          // 10: kvstore.DeleteResponse
-	(*RegisterServerRequest)(nil),   // 11: kvstore.RegisterServerRequest
-	(*RegisterServerResponse)(nil),  // 12: kvstore.RegisterServerResponse
-	(*DiscoverServersRequest)(nil),  // 13: kvstore.DiscoverServersRequest
-	(*DiscoverServersResponse)(nil), // 14: kvstore.DiscoverServersResponse
-	(*ServerInfo)(nil),              // 15: kvstore.ServerInfo
+	(KVCommand_Op)(0),               // 0: kvstore.KVCommand.Op
+	(*PutRequest)(nil),              // 1: kvstore.PutRequest
+	(*PutResponse)(nil),             // 2: kvstore.PutResponse
+	(*SwapRequest)(nil),             // 3: kvstore.SwapRequest
+	(*SwapResponse)(nil),            // 4: kvstore.SwapResponse
+	(*GetRequest)(nil),              // 5: kvstore.GetRequest
+	(*GetResponse)(nil),             // 6: kvstore.GetResponse
+	(*ScanRequest)(nil),             // 7: kvstore.ScanRequest
+	(*ScanResponse)(nil),            // 8: kvstore.ScanResponse
+	(*KeyValue)(nil),                // 9: kvstore.KeyValue
+	(*DeleteRequest)(nil),           // 10: kvstore.DeleteRequest
+	(*DeleteResponse)(nil),          // 11: kvstore.DeleteResponse
+	(*RegisterServerRequest)(nil),   // 12: kvstore.RegisterServerRequest
+	(*RegisterServerResponse)(nil),  // 13: kvstore.RegisterServerResponse
+	(*DiscoverServersRequest)(nil),  // 14: kvstore.DiscoverServersRequest
+	(*DiscoverServersResponse)(nil), // 15: kvstore.DiscoverServersResponse
+	(*PartitionGroup)(nil),          // 16: kvstore.PartitionGroup
+	(*ServerInfo)(nil),              // 17: kvstore.ServerInfo
+	(*KVCommand)(nil),               // 18: kvstore.KVCommand
+	(*KVResult)(nil),                // 19: kvstore.KVResult
+	(*LogEntry)(nil),                // 20: kvstore.LogEntry
+	(*RequestVoteRequest)(nil),      // 21: kvstore.RequestVoteRequest
+	(*RequestVoteResponse)(nil),     // 22: kvstore.RequestVoteResponse
+	(*AppendEntriesRequest)(nil),    // 23: kvstore.AppendEntriesRequest
+	(*AppendEntriesResponse)(nil),   // 24: kvstore.AppendEntriesResponse
 }
 var file_kvstore_proto_depIdxs = []int32{
-	8,  // 0: kvstore.ScanResponse.entries:type_name -> kvstore.KeyValue
-	15, // 1: kvstore.DiscoverServersResponse.servers:type_name -> kvstore.ServerInfo
-	0,  // 2: kvstore.KvStore.Put:input_type -> kvstore.PutRequest
-	2,  // 3: kvstore.KvStore.Swap:input_type -> kvstore.SwapRequest
-	4,  // 4: kvstore.KvStore.Get:input_type -> kvstore.GetRequest
-	6,  // 5: kvstore.KvStore.Scan:input_type -> kvstore.ScanRequest
-	9,  // 6: kvstore.KvStore.Delete:input_type -> kvstore.DeleteRequest
-	11, // 7: kvstore.Manager.RegisterServer:input_type -> kvstore.RegisterServerRequest
-	13, // 8: kvstore.Manager.DiscoverServers:input_type -> kvstore.DiscoverServersRequest
-	1,  // 9: kvstore.KvStore.Put:output_type -> kvstore.PutResponse
-	3,  // 10: kvstore.KvStore.Swap:output_type -> kvstore.SwapResponse
-	5,  // 11: kvstore.KvStore.Get:output_type -> kvstore.GetResponse
-	7,  // 12: kvstore.KvStore.Scan:output_type -> kvstore.ScanResponse
-	10, // 13: kvstore.KvStore.Delete:output_type -> kvstore.DeleteResponse
-	12, // 14: kvstore.Manager.RegisterServer:output_type -> kvstore.RegisterServerResponse
-	14, // 15: kvstore.Manager.DiscoverServers:output_type -> kvstore.DiscoverServersResponse
-	9,  // [9:16] is the sub-list for method output_type
-	2,  // [2:9] is the sub-list for method input_type
-	2,  // [2:2] is the sub-list for extension type_name
-	2,  // [2:2] is the sub-list for extension extendee
-	0,  // [0:2] is the sub-list for field type_name
+	9,  // 0: kvstore.ScanResponse.entries:type_name -> kvstore.KeyValue
+	16, // 1: kvstore.DiscoverServersResponse.partitions:type_name -> kvstore.PartitionGroup
+	17, // 2: kvstore.PartitionGroup.replicas:type_name -> kvstore.ServerInfo
+	0,  // 3: kvstore.KVCommand.op:type_name -> kvstore.KVCommand.Op
+	9,  // 4: kvstore.KVResult.entries:type_name -> kvstore.KeyValue
+	20, // 5: kvstore.AppendEntriesRequest.entries:type_name -> kvstore.LogEntry
+	1,  // 6: kvstore.KvStore.Put:input_type -> kvstore.PutRequest
+	3,  // 7: kvstore.KvStore.Swap:input_type -> kvstore.SwapRequest
+	5,  // 8: kvstore.KvStore.Get:input_type -> kvstore.GetRequest
+	7,  // 9: kvstore.KvStore.Scan:input_type -> kvstore.ScanRequest
+	10, // 10: kvstore.KvStore.Delete:input_type -> kvstore.DeleteRequest
+	12, // 11: kvstore.Manager.RegisterServer:input_type -> kvstore.RegisterServerRequest
+	14, // 12: kvstore.Manager.DiscoverServers:input_type -> kvstore.DiscoverServersRequest
+	21, // 13: kvstore.Raft.RequestVote:input_type -> kvstore.RequestVoteRequest
+	23, // 14: kvstore.Raft.AppendEntries:input_type -> kvstore.AppendEntriesRequest
+	2,  // 15: kvstore.KvStore.Put:output_type -> kvstore.PutResponse
+	4,  // 16: kvstore.KvStore.Swap:output_type -> kvstore.SwapResponse
+	6,  // 17: kvstore.KvStore.Get:output_type -> kvstore.GetResponse
+	8,  // 18: kvstore.KvStore.Scan:output_type -> kvstore.ScanResponse
+	11, // 19: kvstore.KvStore.Delete:output_type -> kvstore.DeleteResponse
+	13, // 20: kvstore.Manager.RegisterServer:output_type -> kvstore.RegisterServerResponse
+	15, // 21: kvstore.Manager.DiscoverServers:output_type -> kvstore.DiscoverServersResponse
+	22, // 22: kvstore.Raft.RequestVote:output_type -> kvstore.RequestVoteResponse
+	24, // 23: kvstore.Raft.AppendEntries:output_type -> kvstore.AppendEntriesResponse
+	15, // [15:24] is the sub-list for method output_type
+	6,  // [6:15] is the sub-list for method input_type
+	6,  // [6:6] is the sub-list for extension type_name
+	6,  // [6:6] is the sub-list for extension extendee
+	0,  // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_kvstore_proto_init() }
@@ -895,13 +1580,14 @@ func file_kvstore_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_kvstore_proto_rawDesc), len(file_kvstore_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   16,
+			NumEnums:      1,
+			NumMessages:   24,
 			NumExtensions: 0,
-			NumServices:   2,
+			NumServices:   3,
 		},
 		GoTypes:           file_kvstore_proto_goTypes,
 		DependencyIndexes: file_kvstore_proto_depIdxs,
+		EnumInfos:         file_kvstore_proto_enumTypes,
 		MessageInfos:      file_kvstore_proto_msgTypes,
 	}.Build()
 	File_kvstore_proto = out.File

@@ -6,15 +6,21 @@ default:
 
 # install extra dependencies of your KV code
 deps:
-    # FIXME: your dependency installation commands here
+    sudo apt-get update && sudo apt-get install -y protobuf-compiler snapd
+    sudo snap install go --classic
+    go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 
 # build your executables in release mode
 build:
-    # FIXME: your build commands here (don't include clean)
+    export PATH=$PATH:$(go env GOPATH)/bin && cd kvstore && protoc --go_out=pb --go_opt=paths=source_relative --go-grpc_out=pb --go-grpc_opt=paths=source_relative -I proto proto/kvstore.proto
+    cd kvstore && go build -o ../bin/kvserver ./server
+    cd kvstore && go build -o ../bin/kvclient ./client
+    cd kvstore && go build -o ../bin/kvmanager ./manager
 
 # clean the build of your executables
 clean:
-    # FIXME: your clean commands here
+    rm -f bin/kvserver bin/kvclient bin/kvmanager bin/kvserver.exe bin/kvclient.exe bin/kvmanager.exe
 
 # run your KV store manager replica
 manager rep_id="0" \
@@ -24,9 +30,14 @@ manager rep_id="0" \
         server_rf="3" \
         servers="127.0.0.1:3777,127.0.0.1:3778,127.0.0.1:3779,127.0.0.1:3780,127.0.0.1:3781,127.0.0.1:3782"\
         backer_path="./backer.m.0":
-    # FIXME: your manager run command here, listening on 0.0.0.0:p2p_port for
-    #        peer replica connections and 0.0.0.0:man_port for both server and
-    #        client registration requests
+    ./bin/kvmanager \
+        --replica_id "{{rep_id}}" \
+        --man_listen "0.0.0.0:{{man_port}}" \
+        --p2p_listen "0.0.0.0:{{p2p_port}}" \
+        --peer_addrs "{{peers}}" \
+        --server_rf "{{server_rf}}" \
+        --server_addrs "{{servers}}" \
+        --backer_path "{{backer_path}}"
 
 # run your KV store server replica
 server part_id="0" \
@@ -36,27 +47,102 @@ server part_id="0" \
        p2p_port="3707" \
        peers="127.0.0.1:3708,127.0.0.1:3709" \
        backer_path="./backer.s0.0":
-    # FIXME: your server run command here. The server should first contact the
-    #        replicated managers to get its assignment of key range(s). It then
-    #        listens on 0.0.0.0:p2p_port for peer replica connections and
-    #        0.0.0.0:api_port for new clients, and stores all durable state under
-    #        backer_path
+    ./bin/kvserver \
+        --partition_id "{{part_id}}" \
+        --replica_id "{{rep_id}}" \
+        --manager_addrs "{{managers}}" \
+        --api_listen "0.0.0.0:{{api_port}}" \
+        --p2p_listen "0.0.0.0:{{p2p_port}}" \
+        --peer_addrs "{{peers}}" \
+        --backer_path "{{backer_path}}"
 
 # run you KV store client in stdin/out interface mode
-client managers="127.0.0.1:3666,127.0.0.1:3667,127.0.0.1:3668":
-    # FIXME: your client run command here, querying the replicated managers
-    #        for server registration information, and then connects to the
-    #        servers ready to perform operations
+client managers="10.10.1.1:3666":
+    ./bin/kvclient --manager_addrs "{{managers}}"
+
+# interactive test: kill <=f followers across >=2 partitions, verify reads/writes stay consistent
+test1 managers="10.10.1.1:3666":
+    ./bin/kvclient --manager_addrs "{{managers}}" --test 1
+
+# interactive test: kill the leader of a partition, verify transparent election + consistent ops
+test2 managers="10.10.1.1:3666":
+    ./bin/kvclient --manager_addrs "{{managers}}" --test 2
+
+# interactive test: kill >f servers in one partition, verify requests to it hang (no stale reads)
+test3 managers="10.10.1.1:3666":
+    ./bin/kvclient --manager_addrs "{{managers}}" --test 3
 
 # kill all processes of your KV store system
 kill:
-    # FIXME: your kill commands here
-    #        make sure that it kills all server, clients, and any extra helper
-    #        processes of your system; redirecting both out & err to /dev/null
-    #        is recommended
-    #   TIP: commands such as 'pkill' may return non-zero exit code on success,
-    #        which would by default abort the 'just' recipe early; prepend the
-    #        command with a '-' sign to ignore its exit code
+    -pkill -f kvserver 2>/dev/null
+    -pkill -f kvclient 2>/dev/null
+    -pkill -f kvmanager 2>/dev/null
+
+# launch manager + n partitions x rf servers locally on {{ip}}
+# e.g. just p3::cluster 3 3  -> 1 manager + 3 partitions of 3 replicas = 9 servers
+cluster n="1" rf="3" ip="10.10.1.1" api_base="3777" p2p_base="3707" man_port="3666" backer_prefix="./backer" flush="true":
+    #!/usr/bin/env bash
+    set -e
+    just p3::build
+    total=$(({{n}} * {{rf}}))
+    if [ "{{flush}}" = "true" ]; then
+        rm -rf "{{backer_prefix}}.m.0"
+        for i in $(seq 0 $((total - 1))); do
+            p=$((i / {{rf}}))
+            r=$((i % {{rf}}))
+            rm -rf "{{backer_prefix}}.s${p}.${r}"
+        done
+        echo "flushed backer dirs"
+    fi
+    # flat server list in partition-major order: p0r0, p0r1, ..., p1r0, ...
+    servers=""
+    for i in $(seq 0 $((total - 1))); do
+        port=$(({{api_base}} + i))
+        [ -n "$servers" ] && servers="$servers,"
+        servers="${servers}{{ip}}:${port}"
+    done
+    # single (non-replicated) manager
+    ./bin/kvmanager \
+        --replica_id 0 \
+        --man_listen "0.0.0.0:{{man_port}}" \
+        --p2p_listen "0.0.0.0:3606" \
+        --peer_addrs "none" \
+        --server_rf "{{rf}}" \
+        --server_addrs "$servers" \
+        --backer_path "{{backer_prefix}}.m.0" &
+    sleep 0.3
+    # n partitions x rf replicas
+    for p in $(seq 0 $(({{n}} - 1))); do
+        for r in $(seq 0 $(({{rf}} - 1))); do
+            idx=$((p * {{rf}} + r))
+            api_port=$(({{api_base}} + idx))
+            p2p_port=$(({{p2p_base}} + idx))
+            # peer_addrs: other replicas' p2p addrs in this partition, ordered by replica id, self excluded
+            if [ "{{rf}}" -eq 1 ]; then
+                peers="none"
+            else
+                peers=""
+                for pr in $(seq 0 $(({{rf}} - 1))); do
+                    if [ "$pr" -ne "$r" ]; then
+                        peer_port=$(({{p2p_base}} + p * {{rf}} + pr))
+                        [ -n "$peers" ] && peers="$peers,"
+                        peers="${peers}{{ip}}:${peer_port}"
+                    fi
+                done
+            fi
+            echo "launching: ./bin/kvserver --partition_id $p --replica_id $r --manager_addrs {{ip}}:{{man_port}} --api_listen 0.0.0.0:${api_port} --p2p_listen 0.0.0.0:${p2p_port} --peer_addrs $peers --backer_path {{backer_prefix}}.s${p}.${r}"
+            ./bin/kvserver \
+                --partition_id "$p" \
+                --replica_id "$r" \
+                --manager_addrs "{{ip}}:{{man_port}}" \
+                --api_listen "0.0.0.0:${api_port}" \
+                --p2p_listen "0.0.0.0:${p2p_port}" \
+                --peer_addrs "$peers" \
+                --backer_path "{{backer_prefix}}.s${p}.${r}" &
+        done
+    done
+    echo "cluster up: manager={{ip}}:{{man_port}}, {{n}} partitions x {{rf}} replicas = ${total} servers ($servers)"
+    wait
 
 # NOTE: feel free to add more recipes as you see fit...
 #       also feel free to add extra parameters to the recipes as you see fit,
